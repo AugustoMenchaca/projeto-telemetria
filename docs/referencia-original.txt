@@ -1,0 +1,201 @@
+Podemos fazer uma investigação por engenharia reversa, mas eu começaria pela comunicação e pelas configurações, não pela modificação do firmware. Nosso objetivo é descobrir como o modem envia os dados e onde está definido o endereço da API para substituí-lo pelo servidor próprio.
+
+Como esse segundo equipamento tem um firmware diferente, não podemos assumir que utilize o mesmo protocolo do ABS CEL S anterior.
+
+## 1. O que precisamos descobrir
+
+Sensores / equipamento de medição
+
+Modem com firmware desconhecido
+
+Protocolo, configuração, endereço e porta
+
+API atual / Supabase
+
+Destino desejado
+
+API do servidor próprio
+
+Existem três possibilidades principais:
+
+- Destino configurável: basta alterar IP, domínio ou porta usando um configurador.
+- Destino embutido no firmware: precisamos identificar onde ele está definido e avaliar se existe um procedimento seguro de atualização.
+- Modem funcionando como gateway: a API é chamada por outro programa, controlador ou serviço, e talvez não precisemos modificar o modem.
+
+A ABS descreve o CEL S como um gateway celular para equipamentos seriais e disponibiliza o Configurador Celular oficial. Isso torna a investigação das configurações uma primeira alternativa particularmente interessante caso o novo equipamento também seja da ABS.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://abstelemetria.com\&sz=32)
+
+ABS Telemetria
+
++1
+
+
+
+Vou propor quatro scripts em Python, começando por testes que não gravam configurações no dispositivo.
+
+## 2. Preparar o ambiente
+
+No Windows, instale Python e a biblioteca de comunicação serial:
+
+```
+py -m pip install pyserial
+```
+
+Os scripts abaixo podem ser salvos como arquivos `.py` e executados pelo terminal do VS Code ou PowerShell.
+
+## Script 1 — Identificar as interfaces seriais
+
+Arquivo: `01_portas.py`
+
+```
+from serial.tools import list_portsports = list(list_ports.comports())if not ports:    print("Nenhuma porta serial encontrada.")else:    for p in ports:        print(f"\nPorta: {p.device}")        print(f"Descrição: {p.description}")        print(f"Fabricante: {p.manufacturer}")        print(f"VID: {p.vid} | PID: {p.pid}")
+```
+
+Execute:
+
+```
+py 01_portas.py
+```
+
+No modem anterior, encontramos `COM8`, mas é importante verificar se o novo equipamento utiliza a mesma porta.
+
+Esse script identifica o conversor, não necessariamente o modelo do modem que está conectado a ele.
+
+## Script 2 — Capturar a comunicação serial sem enviar comandos
+
+Arquivo: `02_captura_serial.py`
+
+Este será o primeiro script de investigação propriamente dito. Ele abre uma porta serial e registra todos os bytes recebidos, em hexadecimal e em texto legível quando possível.
+
+```
+import serialimport argparseimport timeimport jsonfrom datetime import datetime, timezoneparser = argparse.ArgumentParser()parser.add_argument("--port", required=True)parser.add_argument("--baud", type=int, default=9600)parser.add_argument("--seconds", type=int, default=60)parser.add_argument("--output", default="captura.jsonl")args = parser.parse_args()ser = serial.Serial()ser.port = args.portser.baudrate = args.baudser.bytesize = serial.EIGHTBITSser.parity = serial.PARITY_NONEser.stopbits = serial.STOPBITS_ONEser.timeout = 0.2ser.rtscts = Falseser.dsrdtr = Falseser.dtr = Falseser.rts = Falsetry:    ser.open()    print(f"Capturando {args.port} a {args.baud} bps")    end = time.monotonic() + args.seconds    with open(args.output, "w", encoding="utf-8") as file:
+```
+
+Execute:
+
+```
+py 02_captura_serial.py --port COM8 --baud 9600 --seconds 60
+```
+
+Isso gera o arquivo `captura.jsonl`.
+
+O que procuramos: mensagens de inicialização, identificadores do equipamento, dados de sensores, respostas do firmware e possíveis referências a protocolos.
+
+O programa é somente de leitura no nível de aplicação, mas abrir uma porta serial ainda pode alterar os sinais de controle. Faça o teste com o dispositivo em bancada, sem interromper uma instalação de produção.
+
+Se não aparecer nada, isso não prova que o modem está bloqueado. Ele pode usar outra velocidade, estar aguardando uma solicitação, ou simplesmente não enviar dados espontaneamente nessa interface.
+
+Também é importante entender que capturar a serial não equivale a capturar o tráfego 4G.
+
+## Script 3 — Tentar identificar o firmware por comandos AT
+
+Arquivo: `03_identificar_firmware.py`
+
+Muitos módulos celulares possuem interfaces que aceitam comandos AT. Porém, não sabemos se esse firmware expõe essa interface pelo DB9.
+
+Por isso, use este script somente se o manual ou a identificação do módulo confirmar suporte a AT nessa porta, preferencialmente em bancada.
+
+```
+import serialimport argparseimport timeparser = argparse.ArgumentParser()parser.add_argument("--port", required=True)parser.add_argument("--baud", type=int, default=9600)parser.add_argument(    "--confirm-at",    action="store_true")args = parser.parse_args()if not args.confirm_at:    parser.error(        "Confirme suporte a comandos AT com --confirm-at"    )commands = [    "AT",    "ATI",    "AT+CGMI",    "AT+CGMM",    "AT+CGMR"]with serial.Serial(    args.port,    args.baud,    timeout=0.2) as ser:    for cmd in commands:        ser.reset_input_buffer()
+```
+
+Execute, depois de confirmar o suporte:
+
+```
+py 03_identificar_firmware.py --port COM8 --baud 9600 --confirm-at
+```
+
+Caso a interface seja AT e os comandos sejam suportados, poderemos obter fabricante, modelo e revisão do firmware.
+
+Uma resposta como `OK` demonstra que algum componente recebeu e processou o comando. A ausência de resposta não significa que o firmware esteja protegido: a interface pode simplesmente utilizar outro protocolo.
+
+## Script 4 — Analisar uma imagem binária do firmware
+
+Arquivo: `04_analisar_firmware.py`
+
+Este é útil caso você tenha o arquivo `.bin` ou `.img` do firmware, obtido por um procedimento autorizado ou disponibilizado pelo fabricante.
+
+O programa procura endereços e indicadores de protocolos em strings ASCII e UTF-16 presentes no binário.
+
+```
+import reimport sysfrom pathlib import Pathif len(sys.argv) != 2:    print("Uso: py 04_analisar_firmware.py firmware.bin")    sys.exit(1)data = Path(sys.argv[1]).read_bytes()ascii_strings = [    s.decode("ascii", errors="ignore")    for s in re.findall(rb"[\x20-\x7e]{8,}", data)]utf16_strings = [    s.decode("utf-16le", errors="ignore")    for s in re.findall(        rb"(?:[\x20-\x7e]\x00){8,}",        data    )]strings = ascii_strings + utf16_stringsmarkers = [    "supabase",    "http://",    "https://",    "mqtt",    "endpoint",    "server",    "host",    "apn",    "api",    "1883",
+```
+
+Execute:
+
+```
+py 04_analisar_firmware.py firmware.bin
+```
+
+Por exemplo, caso o endereço `projeto.supabase.co` esteja presente em texto simples, o script poderá encontrá-lo.
+
+Entretanto, não encontrar o endereço não significa que ele não exista. O firmware pode estar comprimido, criptografado ou pode buscar as configurações de uma memória separada.
+
+Esse script não extrai nem modifica o firmware do equipamento. Não exponha publicamente imagens binárias que possam conter credenciais.
+
+## Script 5 — Criar uma API local para receber os dados
+
+Arquivo: `05_receptor_teste.py`
+
+Depois de descobrir o protocolo de envio, precisaremos construir o receptor no novo servidor. Por enquanto, podemos testar um endpoint HTTP simples que registra exatamente os bytes recebidos.
+
+```
+from http.server import BaseHTTPRequestHandler, HTTPServerfrom datetime import datetime, timezoneimport base64import jsonclass Receiver(BaseHTTPRequestHandler):    def do_POST(self):        if self.path != "/telemetria":            self.send_error(404)            return        try:            length = int(                self.headers.get("Content-Length", "0")            )        except ValueError:            self.send_error(400)            return        if not 0 < length <= 1024 * 1024:            self.send_error(413)            return        body = self.rfile.read(length)        record = {            "timestamp": datetime.now(                timezone.utc            ).isoformat(),            "content_type": self.headers.get(                "Content-Type", ""            ),            "body_base64": base64.b64encode(                body            ).decode("ascii")
+```
+
+Execute:
+
+```
+py 05_receptor_teste.py
+```
+
+Você pode enviar uma requisição de teste em outro terminal PowerShell:
+
+```
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8080/telemetria" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"sensor":"teste","valor":25.3}'
+```
+
+Esse receptor é apenas um ambiente local de teste. Não é um serviço de produção: não tem autenticação, HTTPS, persistência estruturada ou validação dos dados. Um modem conectado via 4G também não consegue acessar o `127.0.0.1` do seu computador.
+
+## 3. Como escolher o próximo teste
+
+Qual acesso você tem ao segundo modem?
+
+Tenho o modem alimentado e o cabo serial
+
+Tenho um arquivo .bin ou .img do firmware
+
+Tenho acesso ao software configurador
+
+Tenho acesso ao código ou aos logs da API atual
+
+Próximo passo recomendado
+
+Execute primeiro 01_portas.py e depois 02_captura_serial.py. Precisamos observar se a interface transmite alguma coisa.
+
+Continuar a investigação&#x20;
+
+## 4. Uma observação importante sobre o Supabase
+
+O Supabase disponibiliza uma API REST com endereços no formato `https://<projeto>.supabase.co/rest/v1/`.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://supabase.com\&sz=32)
+
+Supabase Docs
+
++1
+
+
+
+Se o firmware realmente faz chamadas para esse endpoint, precisaremos entender o método HTTP, o corpo da requisição, a autenticação e as respostas esperadas.
+
+Mas, se ele envia dados para um serviço intermediário que posteriormente grava no Supabase, a alteração pode ser feita inteiramente nesse serviço, sem reprogramar o dispositivo.
+
+Minha prioridade seria descobrir o destino real da transmissão antes de tentar extrair ou modificar o firmware.
+
+E um detalhe que precisamos confirmar agora: qual é o modelo exato desse segundo modem e como ele está conectado e alimentado? Uma foto da etiqueta e dos conectores permitirá adaptar os scripts ao hardware e evitar que enviemos comandos incompatíveis com o firmware.

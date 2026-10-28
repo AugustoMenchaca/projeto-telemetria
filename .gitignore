@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/RELATORIO-VERIFICACAO.txt
+.env
+.env.*
+!*.example
+/dados/**
+!/dados/README.md
+!/dados/**/
+!/dados/**/.gitkeep
