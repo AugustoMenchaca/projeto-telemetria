@@ -20,6 +20,7 @@ Supabase. O receptor HTTP desta pasta é apenas um ensaio local.
 - [Ficha dos dois equipamentos](docs/equipamento.md): fatos, fontes e campos a coletar.
 - [Roteiro da visita](docs/roteiro.md): preparação, sequência e conferência da operação.
 - [Registro de investigação](docs/registro-investigacao.md): hipóteses, ensaios e interpretação.
+- [Modem de Pedro Osório](docs/modem-tceldb.md): comandos do firmware dualBASE e troca do destino.
 - [Requisitos do receptor](docs/receptor.md): arquitetura proposta e contrato ainda pendente.
 - [Plano de migração](docs/plano-migracao.md): decisão, validação e retorno à configuração original.
 - [Evidências locais](dados/README.md): organização e limites dos registros.
